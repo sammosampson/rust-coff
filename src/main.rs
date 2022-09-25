@@ -44,10 +44,6 @@ fn u32_to_bytes(entry: &u32) -> Vec<u8> {
     any_as_u8_slice(entry).into()
 }
 
-fn i32_to_bytes(entry: &i32) -> Vec<u8> {
-    any_as_u8_slice(entry).into()
-}
-
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 
 const IMAGE_SCN_CNT_INITIALISED_DATA: u32 = 0x00000040;
@@ -77,6 +73,7 @@ struct Coff {
 }
 
 #[repr(packed)]
+#[allow(dead_code)]
 struct CoffHeader {
     magic: u16,
     number_of_sections: u16,
@@ -108,6 +105,7 @@ fn header(
 }
 
 #[repr(packed)]
+#[allow(dead_code)]
 struct CoffSectionHeader {
     short_name: [u8;8],
     physical_address: u32,
@@ -148,6 +146,7 @@ fn section_header(
 }
 
 #[repr(packed)]
+#[allow(dead_code)]
 struct CoffRelocationEntry {
     pointer_to_reference: u32,
     symbol_index: u32,
@@ -175,6 +174,7 @@ union CoffSymbol {
 }
 
 #[repr(packed)]
+#[allow(dead_code)]
 struct CoffSymbolShortNamed {
     name: [u8;8],
     value: u32,
@@ -207,6 +207,7 @@ fn short_named_symbol(
 }
 
 #[repr(packed)]
+#[allow(dead_code)]
 struct CoffSymbolLongNamed {
     pad: u32,
     pointer_to_string_table: u32,
@@ -252,6 +253,7 @@ fn name_symbol(name: &str) -> CoffSymbol {
 }
 
 #[repr(packed)]
+#[allow(dead_code)]
 struct CoffSymbolSection {
     length: u32,
     number_of_relocations: u16,
@@ -379,14 +381,6 @@ fn add_string_to_data_section(coff: &mut Coff, to_add: &str) -> u32 {
     pointer
 }
 
-fn add_dd_to_data_section(coff: &mut Coff, to_add: u32) -> u32 {
-    let pointer = coff.data_section_header.size_of_section; 
-    let mut dd_bytes = u32_to_bytes(&to_add);
-    advance_data_section(coff, dd_bytes.len() as u32);
-    coff.data_section.append(&mut dd_bytes);
-    pointer
-}
-
 fn add_entry_to_text_section(coff: &mut Coff, entry: u8) {
     coff.text_section.push(entry);
     coff.text_section_header.size_of_section += 1;
@@ -460,12 +454,16 @@ fn add_data_section_static_symbol(coff: &mut Coff, name: &str, value: u32) {
     add_static_symbol(coff, name, value, 1);
 }
 
+fn add_text_section_static_symbol(coff: &mut Coff, name: &str, value: u32) {
+    add_static_symbol(coff, name, value, 2);
+}
+
 fn add_foreign_external_symbol(coff: &mut Coff, name: &str) {
     add_external_symbol(coff, name, 0, 0);
 }
 
-fn add_text_section_external_symbol(coff: &mut Coff, name: &str) {
-    add_external_symbol(coff, name, 0, 2);
+fn add_text_section_external_symbol(coff: &mut Coff, name: &str, value: u32) {
+    add_external_symbol(coff, name, value, 2);
 }
 
 fn add_static_symbol(coff: &mut Coff, name: &str, value: u32, section_number: u16) {
@@ -500,48 +498,108 @@ fn write_coff_to_file(coff: &Coff, file: &mut File) -> io::Result<()> {
 
 fn main() {
     let mut coff = create_coff();
+
+    let print_pointer = coff.text_section_header.size_of_section;
+
+    //print
+    // fn prologue    
+    add_push_reg_op(&mut coff, REG_RBP);
+    add_mov_from_qword_reg_to_reg_op(&mut coff, REG_RSP, REG_RBP);
+
+    //store args 1 and 2 in shadow
+    add_mov_reg_to_reg_plus_offset_qword_pointer_op(&mut coff, REG_RCX, REG_RBP, 16);
+    add_mov_reg_to_reg_plus_offset_dword_pointer_op(&mut coff, REG_EDX, REG_RBP, 24);
+
+    //resesrve space for 1 local var (8 bytes)    
+    add_sub_byte_value_from_reg_op(&mut coff, 8, REG_RSP);
+
+    // call to GetStdHandle
+    // resesrve shadow space for call to GetStdHandle
+    add_sub_byte_value_from_reg_op(&mut coff, 32, REG_RSP);
+
+    // set first arg (STD_OUTPUT_HANDLE) for call to GetStdHandle
+    add_mov_dword_value_to_reg_op(&mut coff, 0xFFFFFFF5, REG_ECX);
+
+    // call GetStdHandle
+    add_call_relocatable_addr_op(&mut coff, relocatable_value(0x08, 0x0));
+    
+    // release shadow space for call to GetStdHandle
+    add_add_byte_value_to_reg_op(&mut coff, 32, REG_RSP);
+    
+    // store local variable handle returned
+    add_mov_reg_to_reg_plus_offset_dword_pointer_op(&mut coff, REG_EAX, REG_RBP, 0xF8);
+
+    // call to WriteFile
+    // resesrve space for 5 args, shadow + 1    
+    add_sub_byte_value_from_reg_op(&mut coff, 40, REG_RSP);
+
+    // get values for args for call from storage
+    add_mov_dword_reg_plus_offset_pointer_to_reg_op(&mut coff, REG_RBP, 0xF8, REG_ECX);
+    add_mov_qword_reg_plus_offset_pointer_to_reg_op(&mut coff, REG_RBP, 16, REG_RDX);
+    add_mov_dword_reg_plus_offset_pointer_to_reg_op(&mut coff, REG_RBP, 24, REG_R8);
+    add_xor_qword_reg_into_reg_op(&mut coff, REG_R9, REG_R9);
+    add_mov_dword_value_into_reg_plus_offset_pointer_op(&mut coff, 0x0, REG_RSP, 32);
+
+    // call WriteFile
+    add_call_relocatable_addr_op(&mut coff, relocatable_value(0x07, 0x0));
+
+    // release space for 5 args, shadow + 1    
+    add_add_byte_value_to_reg_op(&mut coff, 40, REG_RSP);
+    
+    // fn epilogue    
+    add_mov_from_qword_reg_to_reg_op(&mut coff, REG_RBP, REG_RSP);
+    add_pop_reg_op(&mut coff, REG_RBP);
+
+    add_ret_op(&mut coff);
+
+    let main_pointer = coff.text_section_header.size_of_section;
+
+    //main:
+    // fn prologue    
+    add_push_reg_op(&mut coff, REG_RBP);
+    add_mov_from_qword_reg_to_reg_op(&mut coff, REG_RSP, REG_RBP);
+
+    // print call:
+    // set shadow space for print call
+    add_sub_byte_value_from_reg_op(&mut coff, 32, REG_RSP);
     
     let hello = "Hello world!\r\n\0";
+    let ds0_pointer = add_string_to_data_section(&mut coff, hello);
     
-    let l1_pointer = add_string_to_data_section(&mut coff, hello);
-    let l2_pointer = add_dd_to_data_section(&mut coff, hello.len() as u32);
-
-    add_sub_byte_from_reg_op(&mut coff, 0x30, REG_RSP);
-    add_mov_signed_dword_value_to_reg_op(&mut coff, -11, REG_ECX);
-    add_call_relocatable_addr_op(&mut coff, relocatable_value(0x08, 0x0));
-    add_mov_from_dword_reg_to_reg_op(&mut coff, REG_EAX, REG_ECX);
-    
+    // set pointer to hello world first arg for print call
     add_lea_reg_plus_offset_pointer_to_reg_op(
         &mut coff, 
         REG_RIP, 
-        relocatable_value(0x02, l1_pointer), 
-        REG_RDX
+        relocatable_value(0x02, ds0_pointer), 
+        REG_RCX
     );
     
-    add_mov_reg_plus_offset_pointer_to_reg_op(
-        &mut coff, 
-        REG_RIP, 
-        relocatable_value(0x02, l2_pointer), 
-        REG_R8
-    );
+    // set hello world length second arg for print call
+    add_mov_dword_value_to_reg_op(&mut coff, 0x0F, REG_EDX);
     
-    add_xor_qword_reg_into_reg_op(&mut coff, REG_R9, REG_R9);
-    add_mov_reg_to_reg_plus_offset_qword_pointer_op(&mut coff, REG_R9, REG_RSP, 0x20);
-    add_call_relocatable_addr_op(&mut coff,  relocatable_value(0x07, 0x0));
-    add_add_byte_to_reg_op(&mut coff, 0x30, REG_RSP);
-    add_ret_op(&mut coff);        
+    //call print
+    add_call_addr_op(&mut coff, 0xFFFFFF9A);
+    
+    // release shadow space for print call    
+    add_add_byte_value_to_reg_op(&mut coff, 32, REG_RSP);
+
+    // fn epilogue    
+    add_mov_from_qword_reg_to_reg_op(&mut coff, REG_RBP, REG_RSP);
+    add_pop_reg_op(&mut coff, REG_RBP);
+
+    add_ret_op(&mut coff);   
        
-    add_debug_file_name_symbols(&mut coff, "hello.asm");
+    add_debug_file_name_symbols(&mut coff, "hello1.asm");
     add_data_section_header_symbols(&mut coff);    
     add_text_section_header_symbols(&mut coff);
     add_absolute_static_symbol(&mut coff, ".absolut", 0);
     add_foreign_external_symbol(&mut coff, "WriteFile");
     add_foreign_external_symbol(&mut coff, "GetStdHandle");
     add_absolute_static_symbol(&mut coff, "STD_OUTPUT_HANDLE", 0xFFFFFFF5);
-    add_data_section_static_symbol(&mut coff, "l1", l1_pointer);
-    add_data_section_static_symbol(&mut coff, "l2", l2_pointer);
-    add_text_section_external_symbol(&mut coff, "main");
-
+    add_data_section_static_symbol(&mut coff, "ds0", ds0_pointer);
+    add_text_section_static_symbol(&mut coff, "print", print_pointer);
+    add_text_section_external_symbol(&mut coff, "main", main_pointer);
+    
     write_coff_to_file(&coff, &mut create_coff_file().unwrap()).unwrap();
 }
 
@@ -549,20 +607,26 @@ const MOD_REGISTER_INDIRECT: u8 = 0x01;
 const MOD_REGISTER_DIRECT: u8 = 0x03;
 const REG_EAX: u8 = 0x00;
 const REG_ECX: u8 = 0x01;
-const REG_RDX: u8 = 0x02;
+const REG_RCX: u8 = REG_ECX;
+const REG_EDX: u8 = 0x02;
+const REG_RDX: u8 = REG_EDX;
 const REG_RSP: u8 = 0x04;
+const REG_RBP: u8 = 0x05;
 const REG_RIP: u8 = 0x05;
-const REG_R8: u8 = 0x00;
-const REG_R9: u8 = 0x01;
+const REG_R8: u8 = 0x08; // plus B bit to make 100
+const REG_R9: u8 = 0x09; // plus B bit to make 101    
 const REX_B: u8 = 0x41;
 const REX_R: u8 = 0x44;
 const REX_W: u8 = 0x48;
 const OP_ADD: u8 = 0x83;
 const OP_LEA: u8 = 0x8D;
 const OP_XOR: u8 = 0x31;
+const OP_PUSH: u8 = 0x50;
+const OP_POP: u8 = 0x58;
 const OP_MOV_R_TO_RM: u8 = 0x89;
 const OP_MOV_RM_TO_R: u8 = 0x8B;
 const OP_MOV_IMM_TO_R: u8 = 0xB8;
+const OP_MOV_IMM_TO_RM: u8 = 0xC7;
 const OP_CALL: u8 = 0xE8;
 const OP_RET: u8 = 0xC3;
 
@@ -573,23 +637,44 @@ fn mod_rm(mod_part: u8, reg_part: u8, r_m_part: u8) -> u8 {
     mod_part << 6 | reg_part << 3 | r_m_part
 }
 
-fn add_sub_byte_from_reg_op(coff: &mut Coff, value: u8, register: u8) {
+fn register_has_high_bit(register: u8) -> bool {
+    register & 0x8 == 0x8
+}
+
+fn remove_register_high_bit(register: u8) -> u8 {
+    register & 0x7
+}
+
+fn add_push_reg_op(coff: &mut Coff, register: u8) {
+    add_entry_to_text_section(coff, OP_PUSH + register);
+}
+
+fn add_pop_reg_op(coff: &mut Coff, register: u8) {
+    add_entry_to_text_section(coff, OP_POP + register);
+}
+
+fn add_sub_byte_value_from_reg_op(coff: &mut Coff, value: u8, register: u8) {
     add_entry_to_text_section(coff, REX_W);
     add_entry_to_text_section(coff, OP_ADD);
     add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_DIRECT, SECONDARY_ADD_OP_SUB, register));
     add_entry_to_text_section(coff, value);
 }
 
-fn add_add_byte_to_reg_op(coff: &mut Coff, value: u8, register: u8) {
+fn add_add_byte_value_to_reg_op(coff: &mut Coff, value: u8, register: u8) {
     add_entry_to_text_section(coff, REX_W);
     add_entry_to_text_section(coff, OP_ADD);
     add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_DIRECT, SECONDARY_OP_NONE, register));
     add_entry_to_text_section(coff, value);
 }
 
-fn add_mov_signed_dword_value_to_reg_op(coff: &mut Coff, value: i32, register: u8) {
+fn add_mov_dword_value_to_reg_op(coff: &mut Coff, value: u32, register: u8) {
     add_entry_to_text_section(coff, OP_MOV_IMM_TO_R + register);
-    add_entries_to_text_section(coff, i32_to_bytes(&value));
+    add_entries_to_text_section(coff, u32_to_bytes(&value));
+}
+
+fn add_mov_from_qword_reg_to_reg_op(coff: &mut Coff, register_from: u8, register_to: u8) {
+    add_entry_to_text_section(coff, REX_W);
+    add_mov_from_dword_reg_to_reg_op(coff, register_from, register_to);
 }
 
 fn add_mov_from_dword_reg_to_reg_op(coff: &mut Coff, register_from: u8, register_to: u8) {
@@ -597,24 +682,53 @@ fn add_mov_from_dword_reg_to_reg_op(coff: &mut Coff, register_from: u8, register
     add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_DIRECT, register_from, register_to));
 }
 
-fn add_mov_reg_plus_offset_pointer_to_reg_op(coff: &mut Coff, address_register: u8, relocatable_address_offset: RelocatableValue, into_register: u8) {
-    add_entry_to_text_section(coff, REX_R);
+fn add_mov_dword_value_into_reg_plus_offset_pointer_op(coff: &mut Coff, value: u32, address_register: u8, address_offset: u8) {
+    add_entry_to_text_section(coff, REX_W);
+    add_entry_to_text_section(coff,OP_MOV_IMM_TO_RM);
+    add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_INDIRECT, 0, address_register));
+    add_entry_to_text_section(coff, 0x24);
+    add_entry_to_text_section(coff, address_offset);
+    add_entries_to_text_section(coff, u32_to_bytes(&value));
+
+}
+
+fn add_mov_dword_reg_plus_offset_pointer_to_reg_op(coff: &mut Coff, address_register: u8, address_offset: u8, into_register: u8) {
+    if register_has_high_bit(into_register) {
+        add_entry_to_text_section(coff, REX_R);    
+    }
     add_entry_to_text_section(coff, OP_MOV_RM_TO_R);
-    add_entry_to_text_section(coff, mod_rm(0, into_register, address_register));
-    add_relocatable_entry_and_text_section_inital_entry(coff, relocatable_address_offset, 0x04);
+    add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_INDIRECT, remove_register_high_bit(into_register), address_register));
+    add_entry_to_text_section(coff, address_offset);
+}
+
+fn add_mov_qword_reg_plus_offset_pointer_to_reg_op(coff: &mut Coff, address_register: u8, address_offset: u8, into_register: u8) {
+    add_entry_to_text_section(coff, REX_W);
+    add_entry_to_text_section(coff, OP_MOV_RM_TO_R);
+    add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_INDIRECT, into_register, address_register));
+    add_entry_to_text_section(coff, address_offset);
 }
 
 fn add_mov_reg_to_reg_plus_offset_qword_pointer_op(coff: &mut Coff, from_register: u8, into_address_register: u8, into_address_offset: u8) {
-    add_entry_to_text_section(coff, REX_W | REX_R);
+    add_entry_to_text_section(coff, REX_W);
     add_entry_to_text_section(coff, OP_MOV_R_TO_RM);
     add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_INDIRECT, from_register, into_address_register));
-    add_entry_to_text_section(coff, 0x24);
+    add_entry_to_text_section(coff, into_address_offset);
+}
+
+fn add_mov_reg_to_reg_plus_offset_dword_pointer_op(coff: &mut Coff, from_register: u8, into_address_register: u8, into_address_offset: u8) {
+    add_entry_to_text_section(coff, OP_MOV_R_TO_RM);
+    add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_INDIRECT, from_register, into_address_register));
     add_entry_to_text_section(coff, into_address_offset);
 }
 
 fn add_call_relocatable_addr_op(coff: &mut Coff, relocatable_address: RelocatableValue) {
     add_entry_to_text_section(coff, OP_CALL);
     add_relocatable_entry_and_text_section_inital_entry(coff, relocatable_address, 0x04);
+}
+
+fn add_call_addr_op(coff: &mut Coff, address: u32) {
+    add_entry_to_text_section(coff, OP_CALL);
+    add_entries_to_text_section(coff, u32_to_bytes(&address));
 }
 
 fn add_lea_reg_plus_offset_pointer_to_reg_op(coff: &mut Coff, address_register: u8, relocatable_address_offset: RelocatableValue, into_register: u8) {
@@ -625,9 +739,13 @@ fn add_lea_reg_plus_offset_pointer_to_reg_op(coff: &mut Coff, address_register: 
 }
 
 fn add_xor_qword_reg_into_reg_op(coff: &mut Coff, register_from: u8, register_into: u8) {
-    add_entry_to_text_section(coff, REX_W | REX_R | REX_B);
+    let mut rex = REX_W | REX_B;
+    if register_has_high_bit(register_from) {
+        rex = rex | REX_R
+    }
+    add_entry_to_text_section(coff, rex);
     add_entry_to_text_section(coff, OP_XOR);
-    add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_DIRECT, register_from, register_into));
+    add_entry_to_text_section(coff, mod_rm(MOD_REGISTER_DIRECT, remove_register_high_bit(register_from), remove_register_high_bit(register_into)));
 }
 
 fn add_ret_op(coff: &mut Coff) {
